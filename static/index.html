@@ -1,1 +1,247 @@
-<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>溢油应急响应与任务追踪</title><style>body{font-family:-apple-system,BlinkMacSystemFont,sans-serif;max-width:900px;margin:2rem auto;padding:0 1rem;color:#17212b}pre{background:#f4f7f9;padding:1rem;overflow:auto}button{padding:.55rem 1rem}</style></head><body><h1>溢油应急响应与任务追踪</h1><p>围控、回收、岸线保护和废弃物处置任务，按证据和监测结果闭环</p><p>估算油量、海况和未完成任务数影响响应等级；关闭前必须完成回收和岸线监测记录。</p><button onclick="loadItems()">刷新列表</button><pre id="out">使用X-Actor和X-Role请求头调用接口。</pre><script>async function loadItems(){const r=await fetch('/api/items',{headers:{'X-Actor':'demo','X-Role':'viewer'}});document.getElementById('out').textContent=JSON.stringify(await r.json(),null,2)}</script></body></html>
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>溢油应急 · 消油剂使用台账</title>
+<style>
+:root{--bd:#d7e0e8;--bg:#f4f7f9;--ink:#17212b;--red:#c0392b;--green:#1e7e44;--blue:#1a5fb4}
+*{box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;margin:0;background:var(--bg);color:var(--ink)}
+header{background:#0f2d4a;color:#fff;padding:.9rem 1.2rem}
+header h1{margin:0;font-size:1.15rem}
+.wrap{max-width:1180px;margin:1.2rem auto;padding:0 1rem;display:grid;grid-template-columns:300px 1fr;gap:1rem}
+.card{background:#fff;border:1px solid var(--bd);border-radius:8px;padding:1rem;margin-bottom:1rem}
+.card h2{margin:0 0 .6rem;font-size:1rem}
+label{display:block;font-size:.78rem;color:#4a5b6a;margin:.5rem 0 .15rem}
+input,select,textarea{width:100%;padding:.42rem .5rem;border:1px solid var(--bd);border-radius:5px;font-size:.85rem}
+button{padding:.5rem .9rem;border:0;border-radius:5px;background:var(--blue);color:#fff;font-size:.85rem;cursor:pointer}
+button.ghost{background:#e7edf2;color:var(--ink)}
+button.danger{background:var(--red)}
+button.small{padding:.25rem .55rem;font-size:.76rem}
+.row{display:flex;gap:.5rem}.row>*{flex:1}
+table{width:100%;border-collapse:collapse;font-size:.8rem}
+th,td{border-bottom:1px solid var(--bd);padding:.4rem .45rem;text-align:left;vertical-align:top}
+th{background:#eef3f7;position:sticky;top:0}
+.tag{display:inline-block;padding:.05rem .45rem;border-radius:10px;font-size:.72rem}
+.tag.active{background:#dcf3e6;color:var(--green)}
+.tag.withdrawn{background:#f3dedb;color:var(--red)}
+.muted{color:#7a8894;font-size:.78rem}
+.err{background:#fbe9e7;border:1px solid #e5b4ad;color:var(--red);padding:.55rem .7rem;border-radius:6px;font-size:.82rem;margin:.5rem 0;white-space:pre-wrap}
+.ok{background:#e7f5ec;border-color:#b7dcc4;color:var(--green)}
+.pill{font-size:.74rem;padding:.1rem .5rem;border-radius:10px;background:#e7edf2;margin-right:.25rem}
+.neg{color:var(--red);font-weight:600}
+.tabs{display:flex;gap:.4rem;margin-bottom:.6rem;flex-wrap:wrap}
+.tabs button{background:#e7edf2;color:var(--ink)}
+.tabs button.on{background:var(--blue);color:#fff}
+.hidden{display:none}
+#msg{position:fixed;right:1rem;bottom:1rem;max-width:420px}
+code{background:#eef3f7;padding:0 .25rem;border-radius:3px}
+</style>
+</head>
+<body>
+<header>
+  <h1>溢油应急响应 · 消油剂使用台账</h1>
+  <div class="muted" style="color:#cfe0ef">批次批准总量 / 适用海域 / 效期集中管理，喷洒逐单核销，撤回留痕不占额度</div>
+</header>
+<div class="wrap">
+  <div>
+    <div class="card">
+      <h2>身份</h2>
+      <label>操作人 X-Actor</label>
+      <input id="actor" value="demo">
+      <label>角色 X-Role</label>
+      <select id="role">
+        <option value="response_commander">response_commander（指挥，可建批次/更正）</option>
+        <option value="operations">operations（作业，可喷洒/撤回）</option>
+        <option value="observer">observer</option>
+        <option value="viewer">viewer（只读）</option>
+      </select>
+      <div style="margin-top:.6rem"><button class="ghost small" onclick="loadAll()">刷新全部</button></div>
+    </div>
+
+    <div class="card">
+      <h2>批次台账</h2>
+      <label>批次号</label><input id="b_no" placeholder="如 D-2026-007">
+      <div class="row">
+        <div><label>批准总量</label><input id="b_total" type="number" step="0.01" placeholder="500"></div>
+        <div><label>单位</label><input id="b_unit" value="L"></div>
+      </div>
+      <label>适用海域（逗号分隔）</label><input id="b_areas" placeholder="东海A区, 东海B区">
+      <div class="row">
+        <div><label>生效起（可空）</label><input id="b_from" type="datetime-local"></div>
+        <div><label>有效期止</label><input id="b_until" type="datetime-local"></div>
+      </div>
+      <div style="margin-top:.6rem"><button onclick="createBatch()">登记批次</button></div>
+    </div>
+  </div>
+
+  <div>
+    <div class="card">
+      <h2>事件</h2>
+      <div id="items"></div>
+    </div>
+
+    <div class="card">
+      <div class="tabs">
+        <button id="tab-register" class="on" onclick="showTab('register')">喷洒登记 / 撤回</button>
+        <button id="tab-batches" onclick="showTab('batches')">批次用量查询</button>
+      </div>
+
+      <div id="pane-register">
+        <h2>喷洒登记（当前事件：<span id="cur-item" class="pill">未选择</span>）</h2>
+        <div class="row">
+          <div><label>批次</label><select id="s_batch"></select></div>
+          <div><label>用量</label><input id="s_amount" type="number" step="0.01"></div>
+        </div>
+        <div class="row">
+          <div><label>开始时间(UTC)</label><input id="s_start" type="datetime-local"></div>
+          <div><label>结束时间(UTC)</label><input id="s_end" type="datetime-local"></div>
+        </div>
+        <div class="row">
+          <div><label>海域</label><input id="s_area" placeholder="须在批次适用海域内"></div>
+          <div><label>操作船</label><input id="s_vessel"></div>
+        </div>
+        <div class="row">
+          <div><label>纬度 (-90~90)</label><input id="s_lat" type="number" step="0.0001"></div>
+          <div><label>经度 (-180~180)</label><input id="s_lng" type="number" step="0.0001"></div>
+        </div>
+        <label>外部单号（可空）</label><input id="s_ref">
+        <div style="margin-top:.6rem"><button onclick="registerSpray()">登记喷洒</button></div>
+        <h2 style="margin-top:1rem">事件喷洒明细</h2>
+        <div style="max-height:340px;overflow:auto"><table id="sprays"></table></div>
+      </div>
+
+      <div id="pane-batches" class="hidden">
+        <h2>按批次查用量</h2>
+        <div style="max-height:520px;overflow:auto"><table id="batch-usage"></table></div>
+      </div>
+    </div>
+  </div>
+</div>
+<div id="msg"></div>
+
+<script>
+let ITEMS=[], BATCHES=[], CURRENT_ITEM=null;
+const $=id=>document.getElementById(id);
+function hdr(){return {'Content-Type':'application/json','X-Actor':$('actor').value||'demo','X-Role':$('role').value};}
+function iso(v){ return v ? new Date(v).toISOString() : null; }
+function flash(text, ok){ const d=document.createElement('div'); d.className='err'+(ok?' ok':''); d.textContent=text; $('msg').appendChild(d); setTimeout(()=>d.remove(), ok?3500:9000); }
+async function api(method, url, body){
+  const opt={method,headers:hdr()};
+  if(body) opt.body=JSON.stringify(body);
+  const r=await fetch(url,opt); const data=await r.json().catch(()=>({}));
+  if(!r.ok){
+    let m=data.message||('HTTP '+r.status);
+    if(data.details && data.details.conflicts){
+      m+='\n冲突批次：'+data.details.batch_no+'（余量 '+data.details.remaining+'）\n'
+        +data.details.conflicts.map(c=>'· ['+c.code+'] '+c.message).join('\n');
+    }
+    throw new Error(m);
+  }
+  return data;
+}
+function fmt(n){ return (Math.round(n*1000)/1000).toString(); }
+function neg(n){ return n<0 ? ' class="neg"':''; }
+
+async function loadAll(){ await Promise.all([loadItems(), loadBatches()]); }
+async function loadItems(){
+  ITEMS=(await fetch('/api/items',{headers:hdr()}).then(r=>r.json())).items||[];
+  renderItems();
+}
+async function loadBatches(){
+  BATCHES=(await api('GET','/api/batches')).batches||[];
+  renderBatchSelect(); renderBatchUsage();
+  if(CURRENT_ITEM) loadSprays(CURRENT_ITEM);
+}
+function renderItems(){
+  $('items').innerHTML='<table><tr><th>ID</th><th>事件</th><th>状态</th><th></th></tr>'
+    +ITEMS.map(i=>`<tr><td>${i.id}</td><td>${i.title}<div class="muted">${i.severity}</div></td>
+      <td><span class="pill">${i.status}</span></td>
+      <td><button class="small ${CURRENT_ITEM===i.id?'':'ghost'}" onclick="selectItem(${i.id})">${CURRENT_ITEM===i.id?'当前':'选择'}</button></td></tr>`).join('')
+    +'</table>';
+}
+function renderBatchSelect(){
+  $('s_batch').innerHTML=BATCHES.map(b=>`<option value="${b.id}">${b.batch_no}｜余 ${fmt(b.remaining)} ${b.unit}｜${b.allowed_areas.join('/')}｜至 ${b.valid_until.replace('+00:00','Z')}</option>`).join('');
+}
+async function selectItem(id){
+  CURRENT_ITEM=id; $('cur-item').textContent='#'+id;
+  renderItems(); await loadSprays(id);
+}
+async function loadSprays(itemId){
+  const usages=(await api('GET','/api/items/'+itemId+'/sprays')).usages||[];
+  $('sprays').innerHTML='<tr><th>#</th><th>批次</th><th>用量</th><th>起止(UTC)</th><th>海域/坐标</th><th>操作船</th><th>状态</th><th></th></tr>'
+    +usages.map(u=>`<tr>
+      <td>${u.id}</td><td>${u.batch_no}</td><td>${fmt(u.amount)}</td>
+      <td class="muted">${u.started_at.replace('+00:00','Z')}<br>${u.ended_at.replace('+00:00','Z')}</td>
+      <td>${u.area}<div class="muted">${u.latitude}, ${u.longitude}</div></td>
+      <td>${u.vessel}</td>
+      <td><span class="tag ${u.status}">${u.status==='active'?'有效':'已撤回'}</span>
+        ${u.status==='withdrawn'?`<div class="muted">${u.withdraw_reason||''}<br>${u.withdrawn_by||''} @${(u.withdrawn_at||'').replace('+00:00','Z')}</div>`:''}</td>
+      <td>${u.status==='active'?`<button class="small danger" onclick="withdraw(${u.id})">撤回</button>`:''}</td>
+    </tr>`).join('');
+}
+async function renderBatchUsage(){
+  let html='<tr><th>批次</th><th>批准总量</th><th>已用(有效)</th><th>余量</th><th>适用海域</th><th>效期</th><th>明细</th></tr>';
+  for(const b of BATCHES){
+    const detail=await api('GET','/api/batches/'+b.id+'/usage').catch(()=>null);
+    const n=detail?detail.usages.length:0;
+    html+=`<tr><td>${b.batch_no}<div class="muted">v${b.version}</div></td>
+      <td>${fmt(b.approved_total)} ${b.unit}</td>
+      <td>${fmt(b.used_total)}</td>
+      <td${neg(b.remaining)}>${fmt(b.remaining)}</td>
+      <td>${b.allowed_areas.map(a=>`<span class="pill">${a}</span>`).join('')}</td>
+      <td class="muted">${(b.valid_from||'').replace('+00:00','Z')||'—'}<br>至 ${b.valid_until.replace('+00:00','Z')}</td>
+      <td><button class="small ghost" onclick="drillBatch(${b.id})">${n} 单</button></td></tr>`;
+  }
+  $('batch-usage').innerHTML=html;
+}
+async function drillBatch(id){
+  const d=await api('GET','/api/batches/'+id+'/usage');
+  alert(d.batch_no+' 用量明细（有效 '+d.active_count+' / 撤回 '+d.withdrawn_count+'）\n\n'
+    +d.usages.map(u=>`#${u.id} 事件${u.item_id} ${u.status} ${fmt(u.amount)}${d.unit} ${u.area} ${u.started_at.replace('+00:00','Z')} ${u.vessel}${u.status==='withdrawn'?'（撤回：'+(u.withdraw_reason||'')+'）':''}`).join('\n'));
+}
+async function createBatch(){
+  try{
+    await api('POST','/api/batches',{
+      batch_no:$('b_no').value.trim(), approved_total:parseFloat($('b_total').value),
+      unit:$('b_unit').value.trim()||'L',
+      allowed_areas:$('b_areas').value.split(',').map(s=>s.trim()).filter(Boolean),
+      valid_from:iso($('b_from').value), valid_until:iso($('b_until').value),
+    });
+    flash('批次已登记',true); await loadBatches();
+  }catch(e){ flash(e.message); }
+}
+async function registerSpray(){
+  if(!CURRENT_ITEM){ flash('请先在左侧选择事件'); return; }
+  try{
+    await api('POST','/api/items/'+CURRENT_ITEM+'/sprays',{
+      batch_id:parseInt($('s_batch').value,10), amount:parseFloat($('s_amount').value),
+      started_at:iso($('s_start').value), ended_at:iso($('s_end').value),
+      area:$('s_area').value.trim(), vessel:$('s_vessel').value.trim(),
+      latitude:parseFloat($('s_lat').value), longitude:parseFloat($('s_lng').value),
+      external_ref:$('s_ref').value.trim()||null,
+    });
+    flash('喷洒已登记并核销批次余量',true);
+    await Promise.all([loadBatches(), loadSprays(CURRENT_ITEM)]);
+  }catch(e){ flash(e.message); }
+}
+async function withdraw(id){
+  const reason=prompt('撤回原因（记录留痕，不占批次额度）：');
+  if(reason===null) return;
+  try{
+    await api('POST','/api/sprays/'+id+'/withdraw',{reason:reason||'页面撤回'});
+    flash('已撤回，额度已释放，过程保留',true);
+    await Promise.all([loadBatches(), loadSprays(CURRENT_ITEM)]);
+  }catch(e){ flash(e.message); }
+}
+function showTab(t){
+  $('pane-register').classList.toggle('hidden',t!=='register');
+  $('pane-batches').classList.toggle('hidden',t!=='batches');
+  $('tab-register').classList.toggle('on',t==='register');
+  $('tab-batches').classList.toggle('on',t==='batches');
+}
+loadAll();
+</script>
+</body>
+</html>

@@ -65,6 +65,41 @@ class Repository:
                     entry_hash TEXT NOT NULL UNIQUE,
                     created_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS dispersant_batches (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    batch_no TEXT NOT NULL UNIQUE,
+                    approved_total REAL NOT NULL CHECK(approved_total > 0),
+                    unit TEXT NOT NULL DEFAULT 'L',
+                    allowed_areas TEXT NOT NULL,
+                    valid_from TEXT,
+                    valid_until TEXT NOT NULL,
+                    version INTEGER NOT NULL DEFAULT 1,
+                    created_by TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS spray_usages (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    item_id INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+                    batch_id INTEGER NOT NULL REFERENCES dispersant_batches(id) ON DELETE RESTRICT,
+                    amount REAL NOT NULL CHECK(amount > 0),
+                    started_at TEXT NOT NULL,
+                    ended_at TEXT NOT NULL,
+                    area TEXT NOT NULL,
+                    latitude REAL NOT NULL CHECK(latitude BETWEEN -90 AND 90),
+                    longitude REAL NOT NULL CHECK(longitude BETWEEN -180 AND 180),
+                    vessel TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'active'
+                        CHECK(status IN ('active','withdrawn')),
+                    withdraw_reason TEXT,
+                    withdrawn_by TEXT,
+                    withdrawn_at TEXT,
+                    external_ref TEXT,
+                    created_by TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    UNIQUE(item_id, external_ref)
+                );
+                CREATE INDEX IF NOT EXISTS ix_spray_batch ON spray_usages(batch_id);
             """)
 
     @staticmethod
@@ -209,6 +244,163 @@ class Repository:
                 return False
             previous = row["entry_hash"]
         return True
+
+    # ---- 消油剂批次台账 ----
+    def create_batch(self, batch_no: str, approved_total: float, unit: str,
+                     allowed_areas: List[str], valid_from: Optional[str],
+                     valid_until: str, actor: str) -> Dict[str, Any]:
+        now = utc_now()
+        try:
+            with self._lock, self.conn:
+                cur = self.conn.execute(
+                    """INSERT INTO dispersant_batches(batch_no, approved_total, unit,
+                       allowed_areas, valid_from, valid_until, version,
+                       created_by, created_at, updated_at)
+                       VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                    (batch_no, approved_total, unit, json.dumps(allowed_areas, ensure_ascii=False),
+                     valid_from, valid_until, 1, actor, now, now),
+                )
+                batch_id = int(cur.lastrowid)
+        except sqlite3.IntegrityError as exc:
+            raise ConflictError("批次号已存在") from exc
+        return self.get_batch(batch_id)
+
+    def get_batch(self, batch_id: int) -> Dict[str, Any]:
+        with self._lock:
+            row = self.conn.execute(
+                "SELECT * FROM dispersant_batches WHERE id=?", (batch_id,)
+            ).fetchone()
+        if row is None:
+            raise NotFoundError("批次不存在")
+        return self._batch(row)
+
+    def list_batches(self) -> List[Dict[str, Any]]:
+        with self._lock:
+            rows = self.conn.execute(
+                "SELECT * FROM dispersant_batches ORDER BY id DESC"
+            ).fetchall()
+        return [self._batch(row) for row in rows]
+
+    def update_batch(self, batch_id: int, approved_total: Optional[float],
+                     allowed_areas: Optional[List[str]], valid_from: Optional[str],
+                     valid_until: Optional[str], expected_version: Optional[int],
+                     actor: str) -> Dict[str, Any]:
+        now = utc_now()
+        current = self.get_batch(batch_id)
+        approved_total = current["approved_total"] if approved_total is None else approved_total
+        allowed_areas = current["allowed_areas"] if allowed_areas is None else allowed_areas
+        valid_from = current["valid_from"] if valid_from is None else valid_from
+        valid_until = current["valid_until"] if valid_until is None else valid_until
+        with self._lock, self.conn:
+            if expected_version is None:
+                cur = self.conn.execute(
+                    """UPDATE dispersant_batches SET approved_total=?, allowed_areas=?,
+                       valid_from=?, valid_until=?, version=version+1, updated_at=?
+                       WHERE id=?""",
+                    (approved_total, json.dumps(allowed_areas, ensure_ascii=False),
+                     valid_from, valid_until, now, batch_id),
+                )
+            else:
+                cur = self.conn.execute(
+                    """UPDATE dispersant_batches SET approved_total=?, allowed_areas=?,
+                       valid_from=?, valid_until=?, version=version+1, updated_at=?
+                       WHERE id=? AND version=?""",
+                    (approved_total, json.dumps(allowed_areas, ensure_ascii=False),
+                     valid_from, valid_until, now, batch_id, expected_version),
+                )
+                if cur.rowcount == 0:
+                    raise ConflictError("版本冲突，请刷新后重试")
+        return self.get_batch(batch_id)
+
+    @staticmethod
+    def _batch(row: sqlite3.Row) -> Dict[str, Any]:
+        item = dict(row)
+        item["allowed_areas"] = json.loads(item["allowed_areas"])
+        return item
+
+    def used_amount(self, batch_id: int) -> float:
+        with self._lock:
+            row = self.conn.execute(
+                "SELECT COALESCE(SUM(amount),0) AS n FROM spray_usages WHERE batch_id=? AND status='active'",
+                (batch_id,),
+            ).fetchone()
+        return float(row["n"])
+
+    # ---- 消油剂喷洒 ----
+    def add_spray(self, item_id: int, batch_id: int, amount: float,
+                  started_at: str, ended_at: str, area: str, latitude: float,
+                  longitude: float, vessel: str, external_ref: Optional[str],
+                  actor: str) -> Dict[str, Any]:
+        now = utc_now()
+        self.get_item(item_id)
+        self.get_batch(batch_id)
+        try:
+            with self._lock, self.conn:
+                cur = self.conn.execute(
+                    """INSERT INTO spray_usages(item_id, batch_id, amount, started_at, ended_at,
+                       area, latitude, longitude, vessel, status, external_ref,
+                       created_by, created_at)
+                       VALUES(?,?,?,?,?,?,?,?,?,'active',?,?,?)""",
+                    (item_id, batch_id, amount, started_at, ended_at, area,
+                     latitude, longitude, vessel, external_ref, actor, now),
+                )
+                spray_id = int(cur.lastrowid)
+        except sqlite3.IntegrityError as exc:
+            raise ConflictError("喷洒记录唯一标识已存在") from exc
+        return self.get_spray(spray_id)
+
+    def get_spray(self, spray_id: int) -> Dict[str, Any]:
+        with self._lock:
+            row = self.conn.execute(
+                "SELECT * FROM spray_usages WHERE id=?", (spray_id,)
+            ).fetchone()
+        if row is None:
+            raise NotFoundError("喷洒记录不存在")
+        return dict(row)
+
+    def list_sprays(self, item_id: Optional[int] = None,
+                    batch_id: Optional[int] = None) -> List[Dict[str, Any]]:
+        sql = "SELECT * FROM spray_usages WHERE 1=1"
+        params: List[Any] = []
+        if item_id is not None:
+            sql += " AND item_id=?"
+            params.append(item_id)
+        if batch_id is not None:
+            sql += " AND batch_id=?"
+            params.append(batch_id)
+        sql += " ORDER BY id"
+        with self._lock:
+            rows = self.conn.execute(sql, params).fetchall()
+        return [dict(row) for row in rows]
+
+    def active_sprays(self, batch_id: int, open_only: bool = True) -> List[Dict[str, Any]]:
+        sql = """SELECT s.* FROM spray_usages s JOIN items i ON i.id=s.item_id
+                 WHERE s.batch_id=? AND s.status='active'"""
+        params: List[Any] = [batch_id]
+        if open_only:
+            sql += " AND i.status != 'closed'"
+        sql += " ORDER BY s.id"
+        with self._lock:
+            rows = self.conn.execute(sql, params).fetchall()
+        return [dict(row) for row in rows]
+
+    def withdraw_spray(self, spray_id: int, reason: str, actor: str) -> Dict[str, Any]:
+        now = utc_now()
+        with self._lock, self.conn:
+            cur = self.conn.execute(
+                """UPDATE spray_usages SET status='withdrawn', withdraw_reason=?,
+                   withdrawn_by=?, withdrawn_at=?
+                   WHERE id=? AND status='active'""",
+                (reason, actor, now, spray_id),
+            )
+            if cur.rowcount == 0:
+                exists = self.conn.execute(
+                    "SELECT 1 FROM spray_usages WHERE id=?", (spray_id,)
+                ).fetchone()
+                if exists is None:
+                    raise NotFoundError("喷洒记录不存在")
+                raise ConflictError("喷洒记录已撤回，不能重复撤回")
+        return self.get_spray(spray_id)
 
     def close(self) -> None:
         with self._lock:

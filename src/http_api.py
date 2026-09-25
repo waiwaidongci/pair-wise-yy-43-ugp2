@@ -5,7 +5,6 @@ from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 from urllib.parse import parse_qs, urlparse
-
 from .domain import (ConflictError, DomainError, NotFoundError, PermissionDenied,
                      ValidationError)
 from .service import Service
@@ -71,26 +70,67 @@ def make_handler(service: Service, static_dir: str):
                 status = 400
             else:
                 status = 500
-            self._json(status, {"error": exc.__class__.__name__, "message": str(exc)})
+            payload: Dict[str, Any] = {"error": exc.__class__.__name__, "message": str(exc)}
+            details = getattr(exc, "details", None)
+            if details:
+                payload["details"] = details
+            self._json(status, payload)
+
+        @staticmethod
+        def _int_id(value: str) -> int:
+            try:
+                result = int(value)
+            except (TypeError, ValueError) as exc:
+                raise NotFoundError("资源不存在") from exc
+            if result < 1:
+                raise NotFoundError("资源不存在")
+            return result
 
         def do_GET(self) -> None:
             try:
-                path = urlparse(self.path).path
+                parsed = urlparse(self.path)
+                path = parsed.path
+                query = parse_qs(parsed.query)
                 if path == "/health":
                     self._json(200, {"status": "ok"})
                 elif path == "/":
                     self._html(root / "index.html")
+                elif path == "/api/batches":
+                    actor, role = self._identity()
+                    del actor
+                    self._json(200, {"batches": service.list_batches(role)})
+                elif path.startswith("/api/batches/") and path.endswith("/usage"):
+                    batch_id = self._int_id(path.split("/")[3])
+                    actor, role = self._identity()
+                    del actor
+                    self._json(200, service.batch_usage(batch_id, role))
+                elif path.startswith("/api/batches/"):
+                    batch_id = self._int_id(path.rsplit("/", 1)[-1])
+                    actor, role = self._identity()
+                    del actor
+                    self._json(200, service.get_batch(batch_id, role))
+                elif path == "/api/sprays":
+                    actor, role = self._identity()
+                    del actor
+                    item_id = self._opt_int(query.get("item_id", [None])[0])
+                    batch_id = self._opt_int(query.get("batch_id", [None])[0])
+                    self._json(200, {"usages": service.list_sprays(role, item_id, batch_id)})
                 elif path == "/api/items":
                     actor, role = self._identity()
                     del actor
                     self._json(200, {"items": service.list_items(role)})
                 elif path.startswith("/api/items/") and path.endswith("/records"):
-                    item_id = int(path.split("/")[3])
+                    item_id = self._int_id(path.split("/")[3])
                     actor, role = self._identity()
                     del actor
                     self._json(200, {"records": service.list_records(item_id, role)})
+                elif path.startswith("/api/items/") and path.endswith("/sprays"):
+                    item_id = self._int_id(path.split("/")[3])
+                    actor, role = self._identity()
+                    del actor
+                    self._json(200, {"usages": service.list_sprays(role, item_id=item_id)})
                 elif path.startswith("/api/items/"):
-                    item_id = int(path.rsplit("/", 1)[-1])
+                    item_id = self._int_id(path.rsplit("/", 1)[-1])
                     actor, role = self._identity()
                     del actor
                     self._json(200, service.get_item(item_id, role))
@@ -103,6 +143,16 @@ def make_handler(service: Service, static_dir: str):
             except Exception as exc:
                 self._send_error(exc)
 
+        @staticmethod
+        def _opt_int(value: Optional[str]) -> Optional[int]:
+            if value is None or value == "":
+                return None
+            try:
+                result = int(value)
+            except (TypeError, ValueError) as exc:
+                raise ValidationError("查询参数必须是整数") from exc
+            return result if result >= 1 else None
+
         def do_POST(self) -> None:
             try:
                 path = urlparse(self.path).path
@@ -110,11 +160,22 @@ def make_handler(service: Service, static_dir: str):
                 body = self._body()
                 if path == "/api/items":
                     self._json(201, service.create_item(body, actor, role))
+                elif path == "/api/batches":
+                    self._json(201, service.create_batch(body, actor, role))
+                elif path.startswith("/api/batches/") and path.endswith("/correct"):
+                    batch_id = self._int_id(path.split("/")[3])
+                    self._json(200, service.correct_batch(batch_id, body, actor, role))
+                elif path.startswith("/api/sprays/") and path.endswith("/withdraw"):
+                    spray_id = self._int_id(path.split("/")[3])
+                    self._json(200, service.withdraw_spray(spray_id, body, actor, role))
                 elif path.startswith("/api/items/") and path.endswith("/records"):
-                    item_id = int(path.split("/")[3])
+                    item_id = self._int_id(path.split("/")[3])
                     self._json(201, service.add_record(item_id, body, actor, role))
+                elif path.startswith("/api/items/") and path.endswith("/sprays"):
+                    item_id = self._int_id(path.split("/")[3])
+                    self._json(201, service.register_spray(item_id, body, actor, role))
                 elif path.startswith("/api/items/") and path.endswith("/transition"):
-                    item_id = int(path.split("/")[3])
+                    item_id = self._int_id(path.split("/")[3])
                     target = body.get("target")
                     expected = body.get("expected_version")
                     self._json(200, service.transition(
