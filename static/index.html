@@ -1,1 +1,88 @@
-<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>溢油应急响应与任务追踪</title><style>body{font-family:-apple-system,BlinkMacSystemFont,sans-serif;max-width:900px;margin:2rem auto;padding:0 1rem;color:#17212b}pre{background:#f4f7f9;padding:1rem;overflow:auto}button{padding:.55rem 1rem}</style></head><body><h1>溢油应急响应与任务追踪</h1><p>围控、回收、岸线保护和废弃物处置任务，按证据和监测结果闭环</p><p>估算油量、海况和未完成任务数影响响应等级；关闭前必须完成回收和岸线监测记录。</p><button onclick="loadItems()">刷新列表</button><pre id="out">使用X-Actor和X-Role请求头调用接口。</pre><script>async function loadItems(){const r=await fetch('/api/items',{headers:{'X-Actor':'demo','X-Role':'viewer'}});document.getElementById('out').textContent=JSON.stringify(await r.json(),null,2)}</script></body></html>
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>溢油应急响应与任务追踪</title><style>
+body{font-family:-apple-system,BlinkMacSystemFont,sans-serif;max-width:960px;margin:2rem auto;padding:0 1rem;color:#17212b}
+pre{background:#f4f7f9;padding:1rem;overflow:auto;white-space:pre-wrap}
+button{padding:.45rem .9rem;cursor:pointer}
+fieldset{border:1px solid #d5dde3;border-radius:6px;margin:1rem 0;padding:.8rem 1rem}
+legend{font-weight:600;padding:0 .4rem}
+label{display:inline-block;margin:.3rem .8rem .3rem 0;font-size:.9rem}
+input,select{padding:.3rem .4rem;margin-left:.3rem}
+table{border-collapse:collapse;width:100%;margin:.5rem 0;font-size:.88rem}
+th,td{border:1px solid #d5dde3;padding:.35rem .5rem;text-align:left}
+th{background:#eef3f6}
+.withdrawn{color:#8a94a0;text-decoration:line-through}
+</style></head><body>
+<h1>溢油应急响应与任务追踪</h1>
+<p>围控、回收、岸线保护和废弃物处置任务，按证据和监测结果闭环。消油剂按批次台账管理：登记批次批准量、适用海域与有效期，喷洒与撤回全程留痕。</p>
+<p><label>操作人<input id="actor" value="demo"></label><label>角色<select id="role"><option value="response_commander">response_commander</option><option value="operations" selected>operations</option><option value="observer">observer</option><option value="viewer">viewer</option></select></label></p>
+
+<fieldset><legend>消油剂批次登记（response_commander）</legend>
+<label>批次号<input id="b_no" placeholder="DSP-2026-001"></label>
+<label>批准总量<input id="b_total" type="number" step="any" value="100"></label>
+<label>适用海域（逗号分隔）<input id="b_areas" value="南海北部,珠江口"></label>
+<label>有效期起<input id="b_from" type="datetime-local"></label>
+<label>有效期止<input id="b_until" type="datetime-local"></label>
+<button onclick="registerBatch()">登记批次</button>
+<button onclick="listBatches()">刷新批次</button>
+<div id="batches"></div>
+</fieldset>
+
+<fieldset><legend>喷洒登记（operations / response_commander）</legend>
+<label>事件ID<input id="s_item" type="number" min="1"></label>
+<label>批次号<input id="s_batch" placeholder="DSP-2026-001"></label>
+<label>用量<input id="s_qty" type="number" step="any"></label>
+<label>开始时间<input id="s_start" type="datetime-local"></label>
+<label>结束时间<input id="s_end" type="datetime-local"></label>
+<label>纬度<input id="s_lat" type="number" step="any" placeholder="22.1"></label>
+<label>经度<input id="s_lon" type="number" step="any" placeholder="113.5"></label>
+<label>海域<input id="s_area" placeholder="南海北部"></label>
+<label>操作船<input id="s_vessel" placeholder="海巡01"></label>
+<button onclick="registerSpray()">登记喷洒</button>
+</fieldset>
+
+<fieldset><legend>事件使用台账 / 撤回</legend>
+<label>事件ID<input id="l_item" type="number" min="1"></label>
+<button onclick="listItemUsages()">查看台账</button>
+<div id="usages"></div>
+</fieldset>
+
+<fieldset><legend>事件列表</legend>
+<button onclick="loadItems()">刷新列表</button>
+<pre id="out">使用X-Actor和X-Role请求头调用接口。</pre>
+</fieldset>
+
+<script>
+const H=()=>({'Content-Type':'application/json','X-Actor':document.getElementById('actor').value,'X-Role':document.getElementById('role').value});
+const iso=v=>v?new Date(v).toISOString():undefined;
+const show=(id,o)=>document.getElementById(id).innerHTML=o;
+const esc=s=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+async function req(method,url,body){const r=await fetch(url,{method,headers:H(),body:body?JSON.stringify(body):undefined});const j=await r.json();if(!r.ok)throw new Error(j.message||r.status);return j}
+async function guard(fn){try{await fn()}catch(e){show('out','<pre>操作失败：'+esc(e.message)+'</pre>')}}
+async function loadItems(){guard(async()=>{const j=await req('GET','/api/items');show('out','<pre>'+esc(JSON.stringify(j,null,2))+'</pre>')})}
+async function registerBatch(){guard(async()=>{
+  const body={batch_no:b_no.value,approved_total:parseFloat(b_total.value),sea_areas:b_areas.value.split(/[,，]/).map(s=>s.trim()).filter(Boolean),valid_from:iso(b_from.value),valid_until:iso(b_until.value)};
+  const j=await req('POST','/api/batches',body);show('out','<pre>批次已登记：'+esc(JSON.stringify(j,null,2))+'</pre>');listBatches()})}
+async function listBatches(){guard(async()=>{
+  const j=await req('GET','/api/batches');
+  let h='<table><tr><th>批次号</th><th>批准总量</th><th>已用</th><th>余量</th><th>适用海域</th><th>有效期</th><th></th></tr>';
+  for(const b of j.batches)h+='<tr><td>'+esc(b.batch_no)+'</td><td>'+b.approved_total+'</td><td>'+b.used_total+'</td><td>'+b.remaining+'</td><td>'+esc(b.sea_areas.join('、'))+'</td><td>'+esc(b.valid_from)+' ~ '+esc(b.valid_until)+'</td><td><button onclick="batchUsage('+b.id+')">查用量</button></td></tr>';
+  show('batches',h+'</table>')})}
+async function batchUsage(id){guard(async()=>{
+  const j=await req('GET','/api/batches/'+id+'/usages');
+  let h='<p>批次 '+esc(j.batch.batch_no)+'：批准 '+j.batch.approved_total+'，已用 '+j.used_total+'，余量 '+j.remaining+'</p>';
+  h+='<table><tr><th>ID</th><th>事件</th><th>用量</th><th>起止时间</th><th>坐标</th><th>海域</th><th>操作船</th><th>状态</th></tr>';
+  for(const u of j.usages)h+='<tr class="'+(u.status==='withdrawn'?'withdrawn':'')+'"><td>'+u.id+'</td><td>'+u.item_id+'</td><td>'+u.quantity+'</td><td>'+esc(u.start_time)+' ~ '+esc(u.end_time)+'</td><td>'+u.latitude+','+u.longitude+'</td><td>'+esc(u.sea_area)+'</td><td>'+esc(u.vessel)+'</td><td>'+u.status+'</td></tr>';
+  show('usages',h+'</table>')})}
+async function registerSpray(){guard(async()=>{
+  const body={batch_no:s_batch.value,quantity:parseFloat(s_qty.value),start_time:iso(s_start.value),end_time:iso(s_end.value),latitude:parseFloat(s_lat.value),longitude:parseFloat(s_lon.value),sea_area:s_area.value,vessel:s_vessel.value};
+  const j=await req('POST','/api/items/'+s_item.value+'/dispersants',body);
+  show('out','<pre>喷洒已登记，批次余量 '+j.remaining+'：'+esc(JSON.stringify(j,null,2))+'</pre>');listBatches()})}
+async function listItemUsages(){guard(async()=>{
+  const j=await req('GET','/api/items/'+l_item.value+'/dispersants');
+  let h='<table><tr><th>ID</th><th>批次</th><th>用量</th><th>起止时间</th><th>坐标</th><th>海域</th><th>操作船</th><th>状态</th><th></th></tr>';
+  for(const u of j.usages){const w=u.status==='withdrawn';h+='<tr class="'+(w?'withdrawn':'')+'"><td>'+u.id+'</td><td>'+esc(u.batch_no)+'</td><td>'+u.quantity+'</td><td>'+esc(u.start_time)+' ~ '+esc(u.end_time)+'</td><td>'+u.latitude+','+u.longitude+'</td><td>'+esc(u.sea_area)+'</td><td>'+esc(u.vessel)+'</td><td>'+u.status+(w?'（'+esc(u.withdraw_reason||'')+'）':'')+'</td><td>'+(w?'':'<button onclick="withdraw('+u.id+')">撤回</button>')+'</td></tr>'}
+  show('usages',h+'</table>')})}
+async function withdraw(id){const reason=prompt('撤回原因');if(!reason)return;guard(async()=>{
+  const j=await req('POST','/api/dispersants/'+id+'/withdraw',{reason});
+  show('out','<pre>已撤回（不占额度），批次余量 '+j.remaining+'</pre>');listItemUsages();listBatches()})}
+listBatches();
+</script></body></html>

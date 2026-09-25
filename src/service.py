@@ -2,11 +2,14 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional
 
-from .domain import ensure_role, normalize_severity, require_number, require_text
+from .domain import (ValidationError, ensure_role, normalize_severity,
+                     require_coordinate, require_number, require_text,
+                     require_text_list, require_timestamp)
 from .repository import Repository
-from .rules import (AUDIT_ROLES, CREATE_ROLES, ENTITY, RECORD_ROLES, TITLE,
-                    VIEW_ROLES, completion_blockers, escalation_required,
-                    priority_score, response_deadline_hours, role_for_transition,
+from .rules import (AUDIT_ROLES, BATCH_ENTITY, BATCH_ROLES, CREATE_ROLES, ENTITY,
+                    RECORD_ROLES, SPRAY_ROLES, TITLE, USAGE_ENTITY, VIEW_ROLES,
+                    completion_blockers, escalation_required, priority_score,
+                    remaining_quota, response_deadline_hours, role_for_transition,
                     validate_transition)
 
 
@@ -90,6 +93,124 @@ class Service:
     def audit(self, role: str, item_id: Optional[int] = None) -> list:
         ensure_role(role, AUDIT_ROLES)
         return self.repository.list_audit(item_id)
+
+    def register_batch(self, payload: Dict[str, Any], actor: str, role: str) -> Dict[str, Any]:
+        ensure_role(role, BATCH_ROLES)
+        actor = require_text(actor, "actor", 100)
+        batch_no = require_text(payload.get("batch_no"), "batch_no", 100)
+        approved_total = require_number(payload.get("approved_total"), "approved_total", 0.000001)
+        sea_areas = require_text_list(payload.get("sea_areas"), "sea_areas")
+        valid_from = require_timestamp(payload.get("valid_from"), "valid_from")
+        valid_until = require_timestamp(payload.get("valid_until"), "valid_until")
+        if valid_from >= valid_until:
+            raise ValidationError("有效期起点必须早于有效期终点")
+        batch = self.repository.create_batch(batch_no, approved_total, sea_areas,
+                                             valid_from, valid_until, actor)
+        self.repository.append_audit("batch_register", BATCH_ENTITY, batch["id"], actor, {
+            "batch_no": batch_no, "approved_total": approved_total,
+            "sea_areas": sea_areas, "valid_from": valid_from, "valid_until": valid_until,
+        })
+        return self.enrich_batch(batch)
+
+    def correct_batch(self, batch_id: int, payload: Dict[str, Any], actor: str,
+                      role: str) -> Dict[str, Any]:
+        ensure_role(role, BATCH_ROLES)
+        actor = require_text(actor, "actor", 100)
+        before = self.repository.get_batch(batch_id)
+        approved_total = require_number(
+            payload.get("approved_total", before["approved_total"]), "approved_total", 0.000001)
+        sea_areas = require_text_list(payload.get("sea_areas", before["sea_areas"]), "sea_areas")
+        valid_from = require_timestamp(payload.get("valid_from", before["valid_from"]), "valid_from")
+        valid_until = require_timestamp(payload.get("valid_until", before["valid_until"]), "valid_until")
+        if valid_from >= valid_until:
+            raise ValidationError("有效期起点必须早于有效期终点")
+        batch = self.repository.correct_batch(batch_id, approved_total, sea_areas,
+                                              valid_from, valid_until, actor)
+        self.repository.append_audit("batch_correct", BATCH_ENTITY, batch_id, actor, {
+            "batch_no": batch["batch_no"],
+            "before": {"approved_total": before["approved_total"],
+                       "sea_areas": before["sea_areas"],
+                       "valid_from": before["valid_from"],
+                       "valid_until": before["valid_until"]},
+            "after": {"approved_total": approved_total, "sea_areas": sea_areas,
+                      "valid_from": valid_from, "valid_until": valid_until},
+        })
+        return self.enrich_batch(batch)
+
+    def get_batch(self, batch_id: int, role: str) -> Dict[str, Any]:
+        self._view(role)
+        return self.enrich_batch(self.repository.get_batch(batch_id))
+
+    def list_batches(self, role: str) -> list:
+        self._view(role)
+        return [self.enrich_batch(batch) for batch in self.repository.list_batches()]
+
+    def register_spray(self, item_id: int, payload: Dict[str, Any], actor: str,
+                       role: str) -> Dict[str, Any]:
+        ensure_role(role, SPRAY_ROLES)
+        actor = require_text(actor, "actor", 100)
+        batch_no = require_text(payload.get("batch_no"), "batch_no", 100)
+        quantity = require_number(payload.get("quantity"), "quantity", 0.000001)
+        start_time = require_timestamp(payload.get("start_time"), "start_time")
+        end_time = require_timestamp(payload.get("end_time"), "end_time")
+        if start_time > end_time:
+            raise ValidationError("开始时间不能晚于结束时间")
+        latitude = require_coordinate(payload.get("latitude"), "latitude", -90.0, 90.0)
+        longitude = require_coordinate(payload.get("longitude"), "longitude", -180.0, 180.0)
+        sea_area = require_text(payload.get("sea_area"), "sea_area", 100)
+        vessel = require_text(payload.get("vessel"), "vessel", 100)
+        usage = self.repository.register_usage(item_id, batch_no, quantity, start_time,
+                                               end_time, latitude, longitude, sea_area,
+                                               vessel, actor)
+        batch = self.repository.get_batch(usage["batch_id"])
+        remaining = remaining_quota(batch["approved_total"],
+                                    self.repository.active_usage_total(batch["id"]))
+        self.repository.append_audit("spray", USAGE_ENTITY, usage["id"], actor, {
+            "item_id": item_id, "batch_no": batch["batch_no"], "quantity": quantity,
+            "start_time": start_time, "end_time": end_time, "sea_area": sea_area,
+            "latitude": latitude, "longitude": longitude, "vessel": vessel,
+            "remaining": remaining,
+        })
+        result = dict(usage, batch_no=batch["batch_no"], remaining=remaining)
+        return result
+
+    def withdraw_spray(self, usage_id: int, payload: Dict[str, Any], actor: str,
+                       role: str) -> Dict[str, Any]:
+        ensure_role(role, SPRAY_ROLES)
+        actor = require_text(actor, "actor", 100)
+        reason = require_text(payload.get("reason"), "reason")
+        usage = self.repository.withdraw_usage(usage_id, reason, actor)
+        batch = self.repository.get_batch(usage["batch_id"])
+        remaining = remaining_quota(batch["approved_total"],
+                                    self.repository.active_usage_total(batch["id"]))
+        self.repository.append_audit("withdraw", USAGE_ENTITY, usage_id, actor, {
+            "item_id": usage["item_id"], "batch_no": batch["batch_no"],
+            "quantity": usage["quantity"], "reason": reason, "remaining": remaining,
+        })
+        result = dict(usage, batch_no=batch["batch_no"], remaining=remaining)
+        return result
+
+    def list_sprays(self, item_id: int, role: str) -> list:
+        self._view(role)
+        return self.repository.list_usages_by_item(item_id)
+
+    def batch_usage(self, batch_id: int, role: str) -> Dict[str, Any]:
+        self._view(role)
+        batch = self.repository.get_batch(batch_id)
+        used = self.repository.active_usage_total(batch_id)
+        return {
+            "batch": self.enrich_batch(batch),
+            "usages": self.repository.list_usages_by_batch(batch_id),
+            "used_total": used,
+            "remaining": remaining_quota(batch["approved_total"], used),
+        }
+
+    def enrich_batch(self, batch: Dict[str, Any]) -> Dict[str, Any]:
+        result = dict(batch)
+        used = self.repository.active_usage_total(batch["id"])
+        result["used_total"] = used
+        result["remaining"] = remaining_quota(batch["approved_total"], used)
+        return result
 
     @staticmethod
     def enrich(item: Dict[str, Any]) -> Dict[str, Any]:

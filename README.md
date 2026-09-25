@@ -30,9 +30,17 @@ python3 app.py --db ./data.db --port 8320
 - `GET /api/items/{id}`
 - `POST /api/items/{id}/records`
 - `POST /api/items/{id}/transition`，必须提交`expected_version`
+- `GET /api/items/{id}/dispersants`，事件消油剂使用台账
+- `POST /api/items/{id}/dispersants`，登记喷洒（事件、批次、用量、起止时间、坐标、操作船）
+- `POST /api/dispersants/{id}/withdraw`，撤回喷洒（留痕但不占额度）
+- `GET /api/batches`、`POST /api/batches`，批次台账（批准总量、适用海域、有效期）
+- `POST /api/batches/{id}/correct`，批次更正，未结束事件按新值核算
+- `GET /api/batches/{id}/usages`，按批次查用量
 - `GET /api/audit`
 
 允许角色：observer, response_commander, operations, viewer。估算油量、海况和未完成任务数影响响应等级；关闭前必须完成回收和岸线监测记录。
+
+消油剂按批次管理：批次过期、海域不符或扣除撤回后超量时整单不保存，报错指出冲突批次和余量；批次登记与更正由response_commander执行，喷洒与撤回由response_commander或operations执行，全部进入审计链。
 
 ## 测试
 

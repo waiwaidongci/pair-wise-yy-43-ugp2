@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Optional
 
 from .audit import make_entry, utc_now
 from .domain import ConflictError, NotFoundError
-from .rules import ID_PREFIX, STATES
+from .rules import ID_PREFIX, STATES, validate_spray
 
 
 class Repository:
@@ -65,6 +65,39 @@ class Repository:
                     entry_hash TEXT NOT NULL UNIQUE,
                     created_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS dispersant_batches (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    batch_no TEXT NOT NULL UNIQUE,
+                    approved_total REAL NOT NULL,
+                    sea_areas TEXT NOT NULL,
+                    valid_from TEXT NOT NULL,
+                    valid_until TEXT NOT NULL,
+                    version INTEGER NOT NULL DEFAULT 1,
+                    created_by TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS dispersant_usages (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    item_id INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+                    batch_id INTEGER NOT NULL REFERENCES dispersant_batches(id),
+                    quantity REAL NOT NULL,
+                    start_time TEXT NOT NULL,
+                    end_time TEXT NOT NULL,
+                    latitude REAL NOT NULL,
+                    longitude REAL NOT NULL,
+                    sea_area TEXT NOT NULL,
+                    vessel TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'active'
+                        CHECK(status IN ('active','withdrawn')),
+                    created_by TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    withdrawn_by TEXT,
+                    withdrawn_at TEXT,
+                    withdraw_reason TEXT
+                );
+                CREATE INDEX IF NOT EXISTS ix_usages_batch ON dispersant_usages(batch_id);
+                CREATE INDEX IF NOT EXISTS ix_usages_item ON dispersant_usages(item_id);
             """)
 
     @staticmethod
@@ -156,6 +189,141 @@ class Repository:
                 (item_id,),
             ).fetchone()
         return int(row["n"])
+
+    @staticmethod
+    def _batch(row: sqlite3.Row) -> Dict[str, Any]:
+        item = dict(row)
+        item["sea_areas"] = json.loads(item["sea_areas"])
+        return item
+
+    def create_batch(self, batch_no: str, approved_total: float, sea_areas: List[str],
+                     valid_from: str, valid_until: str, actor: str) -> Dict[str, Any]:
+        now = utc_now()
+        try:
+            with self._lock, self.conn:
+                cur = self.conn.execute(
+                    """INSERT INTO dispersant_batches(batch_no, approved_total, sea_areas,
+                       valid_from, valid_until, version, created_by, created_at, updated_at)
+                       VALUES(?,?,?,?,?,1,?,?,?)""",
+                    (batch_no, approved_total, json.dumps(sea_areas, ensure_ascii=False),
+                     valid_from, valid_until, actor, now, now),
+                )
+                batch_id = int(cur.lastrowid)
+        except sqlite3.IntegrityError as exc:
+            raise ConflictError("批次号已存在") from exc
+        return self.get_batch(batch_id)
+
+    def get_batch(self, batch_id: int) -> Dict[str, Any]:
+        with self._lock:
+            row = self.conn.execute(
+                "SELECT * FROM dispersant_batches WHERE id=?", (batch_id,)).fetchone()
+        if row is None:
+            raise NotFoundError("批次不存在")
+        return self._batch(row)
+
+    def list_batches(self) -> List[Dict[str, Any]]:
+        with self._lock:
+            rows = self.conn.execute(
+                "SELECT * FROM dispersant_batches ORDER BY id DESC").fetchall()
+        return [self._batch(row) for row in rows]
+
+    def correct_batch(self, batch_id: int, approved_total: float, sea_areas: List[str],
+                      valid_from: str, valid_until: str, actor: str) -> Dict[str, Any]:
+        now = utc_now()
+        with self._lock, self.conn:
+            cur = self.conn.execute(
+                """UPDATE dispersant_batches SET approved_total=?, sea_areas=?, valid_from=?,
+                   valid_until=?, version=version+1, updated_at=? WHERE id=?""",
+                (approved_total, json.dumps(sea_areas, ensure_ascii=False),
+                 valid_from, valid_until, now, batch_id),
+            )
+            if cur.rowcount == 0:
+                raise NotFoundError("批次不存在")
+        return self.get_batch(batch_id)
+
+    def active_usage_total(self, batch_id: int) -> float:
+        with self._lock:
+            row = self.conn.execute(
+                """SELECT COALESCE(SUM(quantity),0) AS total FROM dispersant_usages
+                   WHERE batch_id=? AND status='active'""",
+                (batch_id,),
+            ).fetchone()
+        return float(row["total"])
+
+    def register_usage(self, item_id: int, batch_no: str, quantity: float,
+                       start_time: str, end_time: str, latitude: float, longitude: float,
+                       sea_area: str, vessel: str, actor: str) -> Dict[str, Any]:
+        now = utc_now()
+        with self._lock, self.conn:
+            if self.conn.execute("SELECT 1 FROM items WHERE id=?", (item_id,)).fetchone() is None:
+                raise NotFoundError("项目不存在")
+            row = self.conn.execute(
+                "SELECT * FROM dispersant_batches WHERE batch_no=?", (batch_no,)).fetchone()
+            if row is None:
+                raise NotFoundError("批次不存在")
+            batch = self._batch(row)
+            used = self.conn.execute(
+                """SELECT COALESCE(SUM(quantity),0) AS total FROM dispersant_usages
+                   WHERE batch_id=? AND status='active'""",
+                (batch["id"],),
+            ).fetchone()
+            validate_spray(batch, sea_area, start_time, end_time,
+                           float(used["total"]), quantity)
+            cur = self.conn.execute(
+                """INSERT INTO dispersant_usages(item_id, batch_id, quantity, start_time,
+                   end_time, latitude, longitude, sea_area, vessel, status, created_by,
+                   created_at) VALUES(?,?,?,?,?,?,?,?,?,'active',?,?)""",
+                (item_id, batch["id"], quantity, start_time, end_time, latitude,
+                 longitude, sea_area, vessel, actor, now),
+            )
+            usage_id = int(cur.lastrowid)
+        return self.get_usage(usage_id)
+
+    def get_usage(self, usage_id: int) -> Dict[str, Any]:
+        with self._lock:
+            row = self.conn.execute(
+                "SELECT * FROM dispersant_usages WHERE id=?", (usage_id,)).fetchone()
+        if row is None:
+            raise NotFoundError("喷洒记录不存在")
+        return dict(row)
+
+    def withdraw_usage(self, usage_id: int, reason: str, actor: str) -> Dict[str, Any]:
+        now = utc_now()
+        with self._lock, self.conn:
+            row = self.conn.execute(
+                "SELECT * FROM dispersant_usages WHERE id=?", (usage_id,)).fetchone()
+            if row is None:
+                raise NotFoundError("喷洒记录不存在")
+            if row["status"] == "withdrawn":
+                raise ConflictError("该喷洒记录已撤回")
+            self.conn.execute(
+                """UPDATE dispersant_usages SET status='withdrawn', withdrawn_by=?,
+                   withdrawn_at=?, withdraw_reason=? WHERE id=?""",
+                (actor, now, reason, usage_id),
+            )
+        return self.get_usage(usage_id)
+
+    def list_usages_by_batch(self, batch_id: int) -> List[Dict[str, Any]]:
+        self.get_batch(batch_id)
+        with self._lock:
+            rows = self.conn.execute(
+                """SELECT u.*, b.batch_no FROM dispersant_usages u
+                   JOIN dispersant_batches b ON b.id=u.batch_id
+                   WHERE u.batch_id=? ORDER BY u.id""",
+                (batch_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def list_usages_by_item(self, item_id: int) -> List[Dict[str, Any]]:
+        self.get_item(item_id)
+        with self._lock:
+            rows = self.conn.execute(
+                """SELECT u.*, b.batch_no FROM dispersant_usages u
+                   JOIN dispersant_batches b ON b.id=u.batch_id
+                   WHERE u.item_id=? ORDER BY u.id""",
+                (item_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     def append_audit(self, action: str, entity_type: str, entity_id: int,
                      actor: str, detail: dict) -> Dict[str, Any]:
